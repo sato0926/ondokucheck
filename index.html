@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>発音判定アプリ（マイク権限の改善版）</title>
+  <title>発音判定アプリ（共通単語数方式）</title>
   <style>
     body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Kaku Gothic ProN","Noto Sans JP",Meiryo, sans-serif;margin:20px;background:#f7f7f9;color:#111}
     .container{max-width:900px;margin:0 auto;background:#fff;padding:20px;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,0.08)}
@@ -32,7 +32,7 @@
 </head>
 <body>
   <div class="container">
-    <h1>発音判定アプリ（マイク権限の改善版）</h1>
+    <h1>発音判定アプリ（共通単語数方式）</h1>
     <p class="small">英文を入力し、「英文を聞く」を押すとモデル音声（米国女性、ややゆっくり）で読み上げます。読み終わって2秒後に採点が始まります。録音は「録音開始/停止」ボタンで行い、録音中は赤いランプが点滅します。マイク権限関連のエラー（NotAllowedError）を検出し、分かりやすく案内します。</p>
 
     <label for="target">英文（Target sentence）</label>
@@ -81,263 +81,54 @@
   </div>
 
 <script>
-// --- Helpers ---
 function escapeHtml(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function cleanWords(str){return str.toLowerCase().replace(/[.,!?;:]/g,'').split(/\s+/).filter(Boolean)}
+function scoreByCommonWords(target,recognized){const tWords=cleanWords(target);const rWords=cleanWords(recognized);if(tWords.length===0)return 0;let matched=0;const rCopy=[...rWords];for(const tw of tWords){const idx=rCopy.indexOf(tw);if(idx!==-1){matched++;rCopy.splice(idx,1);}}
+return Math.round((matched/tWords.length)*100)}
+function highlightDiff(target,recognized){const tWords=cleanWords(target);const rWords=cleanWords(recognized);const parts=[];for(const word of rWords){if(tWords.includes(word)){parts.push(escapeHtml(word));}else{parts.push('<span class="highlight-diff">'+escapeHtml(word)+'</span>');}}
+return parts.join(' ')}
 
-// Levenshtein distance (文字レベル)
-function levenshtein(a,b){
-  a = a || '';
-  b = b || '';
-  const m=a.length, n=b.length;
-  if(m===0) return n;
-  if(n===0) return m;
-  const dp = Array.from({length:m+1},(_,i)=>i);
-  for(let j=1;j<=n;j++){
-    let prev = dp[0]; dp[0] = j;
-    for(let i=1;i<=m;i++){
-      const temp = dp[i];
-      dp[i] = Math.min(dp[i]+1, dp[i-1]+1, prev + (a[i-1]===b[j-1]?0:1));
-      prev = temp;
-    }
-  }
-  return dp[m];
-}
-function similarityPercent(a,b){
-  a = String(a||'').trim().toLowerCase().replace(/[\u2018\u2019\u201c\u201d]/g,"'");
-  b = String(b||'').trim().toLowerCase().replace(/[\u2018\u2019\u201c\u201d]/g,"'");
-  if(a.length===0 && b.length===0) return 100;
-  const dist = levenshtein(a,b);
-  const maxLen = Math.max(a.length,b.length) || 1;
-  return Math.max(0, Math.round((1 - dist/maxLen) * 100));
-}
-function highlightDiff(target, recognized){
-  const ta = String(target||'').split(/\s+/).filter(Boolean);
-  const ra = String(recognized||'').split(/\s+/).filter(Boolean);
-  const len = Math.max(ta.length, ra.length);
-  const parts = [];
-  for(let i=0;i<len;i++){
-    const t = ta[i]||''; const r = ra[i]||'';
-    if(t.toLowerCase()===r.toLowerCase()){
-      parts.push(escapeHtml(r||t));
-    } else {
-      if(r) parts.push('<span class="highlight-diff">' + escapeHtml(r) + '</span>');
-      else parts.push('<span class="highlight-diff">(missing)</span>');
-    }
-  }
-  return parts.join(' ');
-}
+const targetEl=document.getElementById('target');
+const speakBtn=document.getElementById('speakBtn');
+const recordBtn=document.getElementById('recordBtn');
+const recordLabel=document.getElementById('recordLabel');
+const checkPermBtn=document.getElementById('checkPermBtn');
+const lamp=document.getElementById('lamp');
+const transcriptEl=document.getElementById('transcript');
+const diffEl=document.getElementById('diffResult');
+const pronBar=document.getElementById('pronBar');
+const fluBar=document.getElementById('fluBar');
+const pronPercent=document.getElementById('pronPercent');
+const fluPercent=document.getElementById('fluPercent');
+const totalScoreEl=document.getElementById('totalScore');
+const resetBtn=document.getElementById('resetBtn');
+const micStateEl=document.getElementById('micState');
+const permHelpEl=document.getElementById('permHelp');
 
-// --- DOM ---
-const targetEl = document.getElementById('target');
-const speakBtn = document.getElementById('speakBtn');
-const recordBtn = document.getElementById('recordBtn');
-const recordLabel = document.getElementById('recordLabel');
-const checkPermBtn = document.getElementById('checkPermBtn');
-const lamp = document.getElementById('lamp');
-const transcriptEl = document.getElementById('transcript');
-const diffEl = document.getElementById('diffResult');
-const pronBar = document.getElementById('pronBar');
-const fluBar = document.getElementById('fluBar');
-const pronPercent = document.getElementById('pronPercent');
-const fluPercent = document.getElementById('fluPercent');
-const totalScoreEl = document.getElementById('totalScore');
-const resetBtn = document.getElementById('resetBtn');
-const micStateEl = document.getElementById('micState');
-const permHelpEl = document.getElementById('permHelp');
+let voices=[];function loadVoices(){voices=speechSynthesis.getVoices()||[]}loadVoices();if(speechSynthesis.onvoiceschanged!==undefined)speechSynthesis.onvoiceschanged=loadVoices;function chooseVoice(){let v=voices.find(x=>/en-US|en_US/.test(x.lang)&&/female|woman|female/i.test(String(x.name)));if(!v)v=voices.find(x=>/en-US|en_US/.test(x.lang));if(!v)v=voices[0];return v||null}
+let lastUtteranceEndTime=0;
+speakBtn.addEventListener('click',()=>{const text=targetEl.value.trim();if(!text){alert('英文を入力してください。');return}if(!('speechSynthesis'in window)){alert('このブラウザは音声合成をサポートしていません。Chromeを推奨します。');return}speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(text);const v=chooseVoice();if(v)u.voice=v;u.lang='en-US';u.rate=0.9;u.pitch=1.0;u.onend=()=>{lastUtteranceEndTime=Date.now();setTimeout(()=> startScoringAfterRead(),2000);};speechSynthesis.speak(u)});
 
-let voices = [];
-function loadVoices(){ voices = speechSynthesis.getVoices() || []; }
-loadVoices();
-if (speechSynthesis.onvoiceschanged !== undefined) speechSynthesis.onvoiceschanged = loadVoices;
-function chooseVoice(){
-  let v = voices.find(x => /en-US|en_US/.test(x.lang) && /female|woman|female/i.test(String(x.name)));
-  if(!v) v = voices.find(x => /en-US|en_US/.test(x.lang));
-  if(!v) v = voices[0];
-  return v || null;
-}
+let recognizing=false;let recognition=null;let permissionState='unknown';
+function initRecognition(){const SpeechRecognition=window.SpeechRecognition||window.webkitSpeechRecognition;if(!SpeechRecognition)return null;const r=new SpeechRecognition();r.lang='en-US';r.interimResults=true;r.maxAlternatives=1;r.continuous=true;r.onresult=(e)=>{let final='';let interim='';for(let i=e.resultIndex;i<e.results.length;i++){const res=e.results[i];if(res.isFinal)final+=res[0].transcript;else interim+=res[0].transcript;}const shown=(final+' '+interim).trim()||'—';transcriptEl.textContent=shown;};r.onstart=()=>{recognizing=true;lamp.classList.add('blink');recordLabel.textContent='録音中...';};r.onend=()=>{recognizing=false;lamp.classList.remove('blink');recordLabel.textContent='録音開始/停止';};r.onerror=(e)=>{console.error('recognition error',e);showPermMessage('音声認識エラー: '+(e.error||e.message));lamp.classList.remove('blink');};return r}
+recognition=initRecognition();
 
-// --- Speech Synthesis ---
-let lastUtteranceEndTime = 0;
-speakBtn.addEventListener('click', ()=>{
-  const text = targetEl.value.trim();
-  if(!text){alert('英文を入力してください。');return}
-  if(!('speechSynthesis' in window)){alert('このブラウザは音声合成をサポートしていません。Chromeを推奨します。');return}
-  speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(text);
-  const v = chooseVoice(); if(v) u.voice = v;
-  u.lang = 'en-US'; u.rate = 0.9; u.pitch = 1.0;
-  u.onend = ()=>{ lastUtteranceEndTime = Date.now(); setTimeout(()=> startScoringAfterRead(), 2000); };
-  speechSynthesis.speak(u);
-});
+async function updateMicrophonePermissionStatus(){permHelpEl.style.display='none';if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){permissionState='unsupported';micStateEl.textContent='サポートされていません';document.getElementById('permStatus').classList.add('error');return}if(navigator.permissions&&navigator.permissions.query){try{const p=await navigator.permissions.query({name:'microphone'});permissionState=p.state;micStateEl.textContent=permissionState;p.onchange=()=>{permissionState=p.state;micStateEl.textContent=permissionState;};return}catch(e){}}
+try{const s=await navigator.mediaDevices.getUserMedia({audio:true});s.getTracks().forEach(t=>t.stop());permissionState='granted';micStateEl.textContent='granted';}catch(err){if(err&&(err.name==='NotAllowedError'||err.name==='PermissionDeniedError')){permissionState='denied';micStateEl.textContent='denied';}else{permissionState='prompt';micStateEl.textContent='prompt';}}}
 
-// --- Speech Recognition & Permission handling ---
-let recognizing = false;
-let recognition = null;
-let permissionState = 'unknown'; // 'granted' | 'denied' | 'prompt' | 'unknown' | 'unsupported'
+function showPermMessage(msg,isError=true){permHelpEl.style.display='block';permHelpEl.className=isError?'status error':'status';permHelpEl.innerHTML='<strong>'+escapeHtml(msg)+'</strong>'}
 
-function initRecognition(){
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if(!SpeechRecognition) return null;
-  const r = new SpeechRecognition();
-  r.lang = 'en-US'; r.interimResults = true; r.maxAlternatives = 1; r.continuous = true;
-  r.onresult = (e)=>{
-    let final = ''; let interim = '';
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      const res = e.results[i];
-      if(res.isFinal) final += res[0].transcript;
-      else interim += res[0].transcript;
-    }
-    const shown = (final + ' ' + interim).trim() || '—';
-    transcriptEl.textContent = shown;
-  };
-  r.onstart = ()=>{ recognizing = true; lamp.classList.add('blink'); recordLabel.textContent = '録音中...'; };
-  r.onend = ()=>{ recognizing = false; lamp.classList.remove('blink'); recordLabel.textContent = '録音開始/停止'; };
-  r.onerror = (e)=>{ console.error('recognition error', e); showPermMessage('音声認識エラー: ' + (e.error || e.message)); lamp.classList.remove('blink'); };
-  return r;
-}
-recognition = initRecognition();
+checkPermBtn.addEventListener('click',async()=>{await updateMicrophonePermissionStatus();if(permissionState==='denied'){showPermissionInstructions();}else{permHelpEl.style.display='block';permHelpEl.className='status';permHelpEl.textContent='現在の状態: '+permissionState+' — 録音ボタンを押すとブラウザの許可ダイアログが表示される場合があります。';}});
 
-async function updateMicrophonePermissionStatus(){
-  permHelpEl.style.display = 'none';
-  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    permissionState = 'unsupported'; micStateEl.textContent = 'サポートされていません'; document.getElementById('permStatus').classList.add('error');
-    return;
-  }
+function showPermissionInstructions(){permHelpEl.style.display='block';permHelpEl.className='status error';permHelpEl.innerHTML='<strong>マイクがブロックされています（Permission denied）。</strong>\n'+'<div style="margin-top:8px">対処方法の例：</div>'+'<ul style="margin-top:6px;margin-left:18px">'+'<li>ブラウザのアドレスバーの鍵アイコン（またはサイト情報）をクリックしてマイクを許可してください。</li>'+'<li>Chromeなら: 設定 → プライバシーとセキュリティ → サイトの設定 → マイク を確認してください。</li>'+'<li>または、このページをHTTPSでホストして再試行してください（file:// ではマイク権限が働かない場合があります）。</li>'+'<li>権限を変更したら「マイク権限を確認」ボタンを押してください。</li>'+'</ul>';}
 
-  // Try Permissions API if available
-  if(navigator.permissions && navigator.permissions.query){
-    try{
-      const p = await navigator.permissions.query({name:'microphone'});
-      permissionState = p.state; micStateEl.textContent = permissionState;
-      // update on change
-      p.onchange = ()=>{ permissionState = p.state; micStateEl.textContent = permissionState; };
-      return;
-    }catch(e){
-      // Permissions API may throw in some contexts; fall back to probing
-    }
-  }
+recordBtn.addEventListener('click',async()=>{if(!recognition){alert('このブラウザはWeb Speech API（音声認識）をサポートしていません。Chromeデスクトップを推奨します。');return}if(recognizing){try{recognition.stop();}catch(e){console.warn(e);}return}if(permissionState==='denied'){showPermissionInstructions();return}try{const stream=await navigator.mediaDevices.getUserMedia({audio:true});stream.getTracks().forEach(t=>t.stop());permissionState='granted';micStateEl.textContent='granted';}catch(err){console.error('getUserMedia error:',err);if(err&&(err.name==='NotAllowedError'||err.name==='PermissionDeniedError')){permissionState='denied';micStateEl.textContent='denied';showPermissionInstructions();return}else{const msg=(err&&err.name)?err.name+': '+(err.message||''):'マイクの取得に失敗しました。';showPermMessage(msg);return}}try{recognition.start();}catch(e){console.error('recognition.start error',e);showPermMessage('音声認識の開始に失敗しました: '+(e.message||e.name));}});
 
-  // Fallback: probe by requesting but immediately stopping
-  try{
-    const s = await navigator.mediaDevices.getUserMedia({audio:true});
-    s.getTracks().forEach(t=>t.stop());
-    permissionState = 'granted'; micStateEl.textContent = 'granted';
-  }catch(err){
-    if(err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')){
-      permissionState = 'denied'; micStateEl.textContent = 'denied';
-    } else {
-      permissionState = 'prompt'; micStateEl.textContent = 'prompt';
-    }
-  }
-}
+resetBtn.addEventListener('click',()=>{transcriptEl.textContent='—';diffEl.textContent='—';pronBar.style.width='0%';pronPercent.textContent='—';fluBar.style.width='0%';fluPercent.textContent='—';totalScoreEl.textContent='—';permHelpEl.style.display='none';micStateEl.textContent='未確認';permissionState='unknown'});
 
-function showPermMessage(msg, isError=true){
-  permHelpEl.style.display = 'block'; permHelpEl.className = isError ? 'status error' : 'status';
-  permHelpEl.innerHTML = '<strong>' + escapeHtml(msg) + '</strong>';
-}
+function startScoringAfterRead(){const recognized=(transcriptEl.textContent==='—')?'':transcriptEl.textContent;const target=targetEl.value.trim();const pron=scoreByCommonWords(target,recognized);pronBar.style.width=pron+'%';pronPercent.textContent=pron+'%';let flu=0;const words=(recognized.trim().length===0?target.split(/\s+/):recognized.split(/\s+/)).filter(Boolean).length;let durationSec=0;if(!recognizing&&lastUtteranceEndTime){durationSec=Math.max(1,(Date.now()-lastUtteranceEndTime)/1000);}const wpm=durationSec>0?(words/durationSec)*60:120;if(wpm<80)flu=Math.round((wpm/80)*100);else if(wpm<=160)flu=100;else flu=Math.max(0,Math.round((160/wpm)*100));if(recognized.trim().length===0)flu=Math.round(flu*0.6);fluBar.style.width=flu+'%';fluPercent.textContent=Math.round(flu)+'%';const total=Math.round(pron*0.7+flu*0.3);totalScoreEl.textContent=total+' / 100';diffEl.innerHTML='<div><strong>Recognized:</strong></div><div>'+highlightDiff(target,recognized)+'</div>'}
 
-checkPermBtn.addEventListener('click', async ()=>{
-  await updateMicrophonePermissionStatus();
-  if(permissionState === 'denied'){
-    showPermissionInstructions();
-  } else {
-    permHelpEl.style.display = 'block'; permHelpEl.className = 'status';
-    permHelpEl.textContent = '現在の状態: ' + permissionState + ' — 録音ボタンを押すとブラウザの許可ダイアログが表示される場合があります。';
-  }
-});
-
-function showPermissionInstructions(){
-  // Give user platform-agnostic guidance
-  permHelpEl.style.display = 'block'; permHelpEl.className = 'status error';
-  permHelpEl.innerHTML = '<strong>マイクがブロックされています（Permission denied）。</strong>\n' +
-    '<div style="margin-top:8px">対処方法の例：</div>' +
-    '<ul style="margin-top:6px;margin-left:18px">' +
-    '<li>ブラウザのアドレスバーの鍵アイコン（またはサイト情報）をクリックしてマイクを許可してください。</li>' +
-    '<li>Chromeなら: 設定 → プライバシーとセキュリティ → サイトの設定 → マイク を確認してください。</li>' +
-    '<li>または、このページをHTTPSでホストして再試行してください（file:// ではマイク権限が働かない場合があります）。</li>' +
-    '<li>権限を変更したら「マイク権限を確認」ボタンを押してください。</li>' +
-    '</ul>';
-}
-
-// Event: Record button
-recordBtn.addEventListener('click', async ()=>{
-  if(!recognition){ alert('このブラウザはWeb Speech API（音声認識）をサポートしていません。Chromeデスクトップを推奨します。'); return; }
-
-  if(recognizing){
-    try{ recognition.stop(); }catch(e){ console.warn(e); }
-    return;
-  }
-
-  // If we know permission is denied, show instructions instead of requesting
-  if(permissionState === 'denied'){
-    showPermissionInstructions();
-    return;
-  }
-
-  // Request microphone permission proactively (getUserMedia) so that we can detect user's decision
-  try{
-    const stream = await navigator.mediaDevices.getUserMedia({audio:true});
-    // we got access -> immediately stop tracks to release mic
-    stream.getTracks().forEach(t=>t.stop());
-    permissionState = 'granted'; micStateEl.textContent = 'granted';
-  }catch(err){
-    console.error('getUserMedia error:', err);
-    if(err && (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError')){
-      permissionState = 'denied'; micStateEl.textContent = 'denied';
-      showPermissionInstructions();
-      return;
-    } else {
-      // other errors (e.g. NotFoundError when no mic)
-      const msg = (err && err.name) ? err.name + ': ' + (err.message || '') : 'マイクの取得に失敗しました。';
-      showPermMessage(msg);
-      return;
-    }
-  }
-
-  // Start recognition now that permission is granted
-  try{
-    recognition.start();
-  }catch(e){
-    // sometimes recognition.start throws if called too soon; show message
-    console.error('recognition.start error', e);
-    showPermMessage('音声認識の開始に失敗しました: ' + (e.message || e.name));
-  }
-});
-
-// Reset
-resetBtn.addEventListener('click', ()=>{
-  transcriptEl.textContent = '—'; diffEl.textContent = '—'; pronBar.style.width = '0%'; pronPercent.textContent = '—'; fluBar.style.width = '0%'; fluPercent.textContent = '—'; totalScoreEl.textContent = '—';
-  permHelpEl.style.display = 'none'; micStateEl.textContent = '未確認'; permissionState = 'unknown';
-});
-
-// --- Scoring after read ---
-function startScoringAfterRead(){
-  const recognized = (transcriptEl.textContent === '—') ? '' : transcriptEl.textContent;
-  const target = targetEl.value.trim();
-  const pron = similarityPercent(target, recognized);
-  pronBar.style.width = pron + '%'; pronPercent.textContent = pron + '%';
-
-  let flu = 0;
-  const words = (recognized.trim().length===0 ? target.split(/\s+/) : recognized.split(/\s+/)).filter(Boolean).length;
-  let durationSec = 0;
-  if(!recognizing && lastUtteranceEndTime){ durationSec = Math.max(1, (Date.now() - lastUtteranceEndTime)/1000); }
-  const wpm = durationSec>0 ? (words / durationSec) * 60 : 120;
-  if(wpm < 80) flu = Math.round((wpm/80)*100);
-  else if(wpm <= 160) flu = 100;
-  else flu = Math.max(0, Math.round((160/wpm)*100));
-  if(recognized.trim().length===0) flu = Math.round(flu * 0.6);
-  fluBar.style.width = flu + '%'; fluPercent.textContent = Math.round(flu) + '%';
-
-  const total = Math.round(pron * 0.7 + flu * 0.3);
-  totalScoreEl.textContent = total + ' / 100';
-  diffEl.innerHTML = '<div><strong>Recognized:</strong></div><div>' + highlightDiff(target,recognized) + '</div>';
-}
-
-// When page loads, check microphone permission status (best-effort)
-window.addEventListener('load', ()=>{ updateMicrophonePermissionStatus().catch(e=>{ console.warn('permission check failed', e); micStateEl.textContent = 'unknown'; }); });
-// Safety: stop recognition on unload
-window.addEventListener('beforeunload', ()=>{ if(recognition && recognizing) try{ recognition.stop(); }catch(e){} });
-
+window.addEventListener('load',()=>{updateMicrophonePermissionStatus().catch(e=>{console.warn('permission check failed',e);micStateEl.textContent='unknown';});});window.addEventListener('beforeunload',()=>{if(recognition&&recognizing)try{recognition.stop();}catch(e){}});
 </script>
 </body>
 </html>
